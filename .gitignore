@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+/venv/
+/env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Data — never commit; lives in R2 (root-level only — don't shadow src/cube_draft/data/)
+/data/
+*.parquet
+*.csv
+*.csv.gz
+*.json.gz
+
+# Card data caches (large, fetched at runtime)
+cache/
+scryfall_*.json
+
+# Logs / checkpoints
+*.log
+*.ckpt
+*.pt
+*.onnx
+wandb/
+runs/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Local-only docs
+*.md
+/docs/
