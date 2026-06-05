@@ -43,8 +43,11 @@ from cube_draft.bots.random_bot import RandomBot  # noqa: E402
 from cube_draft.bots.raredraft import RaredraftBot  # noqa: E402
 from cube_draft.cards import features  # noqa: E402
 from cube_draft.cards.vocab import CardVocab, CubeVocab  # noqa: E402
+from cube_draft.data import (
+    cube_list,  # noqa: E402
+    rollout,  # noqa: E402
+)
 from cube_draft.data import dataset as ds  # noqa: E402
-from cube_draft.data import rollout  # noqa: E402
 from cube_draft.env.cube_draft import DraftConfig  # noqa: E402
 from cube_draft.model.cc_cpr import CCCPR, CubeTensors, DraftBatch, triplet_loss  # noqa: E402
 from cube_draft.utils import checkpoint as ckpt  # noqa: E402
@@ -207,8 +210,15 @@ def train(args: argparse.Namespace) -> None:
             train_data.append(cube_data.train)
             eval_data.append(cube_data.eval)
     else:
-        for c in range(args.num_cubes):
-            cube = build_cube(global_vocab, args.cube_size, rng)
+        # A fixed published cube (--cube-list) or N random cubes.
+        if args.cube_list:
+            oracle_ids = cube_list.load_oracle_ids(args.cube_list)
+            cubes = [CubeVocab(global_vocab, oracle_ids)]
+            logger.info("cube-list %s: %d cards (%d dropped as OOV)",
+                        args.cube_list, cubes[0].size, len(cubes[0].discarded))
+        else:
+            cubes = [build_cube(global_vocab, args.cube_size, rng) for _ in range(args.num_cubes)]
+        for c, cube in enumerate(cubes):
             logger.info("cube %d: %d cards; generating %d teacher drafts", c, cube.size, args.drafts_per_cube)
             cube_ts.append(cube_tensors(cube).to(device))
             train_data.append(collect_teacher_decisions(cube, args.teacher, args.drafts_per_cube, cfg, rng))
@@ -327,6 +337,12 @@ def main() -> None:
         default=None,
         help="prebuilt distillation dataset dir or R2 prefix (e.g. CubeCobraBot); "
         "when set, --cube-size/--num-cubes/--drafts-per-cube/--teacher are ignored",
+    )
+    p.add_argument(
+        "--cube-list",
+        default=None,
+        help="oracle_id cube file (path or R2 key) to train on a fixed published cube "
+        "(e.g. the Arena Cube) instead of random cubes; ignored if --dataset is set",
     )
     p.add_argument("--cube-size", type=int, default=360)
     p.add_argument("--num-cubes", type=int, default=4, help="distinct random cubes to train across")

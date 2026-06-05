@@ -32,8 +32,11 @@ except ImportError:
 
 from cube_draft.bots.cubecobra import CubeCobraBot, NodeBridgeTransport  # noqa: E402
 from cube_draft.cards.vocab import CardVocab, CubeVocab  # noqa: E402
+from cube_draft.data import (
+    cube_list,  # noqa: E402
+    rollout,  # noqa: E402
+)
 from cube_draft.data import dataset as ds  # noqa: E402
-from cube_draft.data import rollout  # noqa: E402
 from cube_draft.env.cube_draft import DraftConfig  # noqa: E402
 
 logger = logging.getLogger("gen_distill_dataset")
@@ -57,6 +60,12 @@ def main() -> None:
     p.add_argument("--data", type=Path, default=Path("data/cards.parquet"))
     p.add_argument("--out", type=Path, required=True, help="dataset output directory")
     p.add_argument("--r2-prefix", default=None, help="R2 prefix to mirror the dataset to")
+    p.add_argument(
+        "--cube-list",
+        default=None,
+        help="oracle_id cube file (path or R2 key) to generate on a fixed published "
+        "cube (e.g. the Arena Cube) instead of random cubes; sets num-cubes=1",
+    )
     p.add_argument("--num-cubes", type=int, default=4)
     p.add_argument("--cube-size", type=int, default=360)
     p.add_argument("--drafts-per-cube", type=int, default=32)
@@ -75,13 +84,20 @@ def main() -> None:
     basics = find_basics(vocab)
     cfg = DraftConfig()
 
+    if args.cube_list:
+        fixed = cube_list.load_oracle_ids(args.cube_list)
+        cube_specs = [fixed]
+        logger.info("cube-list %s: %d oracle_ids", args.cube_list, len(fixed))
+    else:
+        cube_specs = [
+            [vocab.card(int(i)).oracle_id for i in rng.choice(len(vocab), size=min(args.cube_size, len(vocab)), replace=False)]
+            for _ in range(args.num_cubes)
+        ]
+
     transport = NodeBridgeTransport(node=args.node)
     try:
         cubes_data: list[ds.CubeData] = []
-        for c in range(args.num_cubes):
-            size = min(args.cube_size, len(vocab))
-            idx = rng.choice(len(vocab), size=size, replace=False)
-            oracle_ids = [vocab.card(int(i)).oracle_id for i in idx]
+        for c, oracle_ids in enumerate(cube_specs):
             cube = CubeVocab(vocab, oracle_ids)
 
             bot = CubeCobraBot(
@@ -92,7 +108,7 @@ def main() -> None:
             )
             drafters = [bot] * cfg.num_seats  # stateless across seats; one bot is fine
             logger.info("cube %d/%d (%d cards): %d train + %d eval drafts",
-                        c + 1, args.num_cubes, cube.size, args.drafts_per_cube, args.eval_drafts)
+                        c + 1, len(cube_specs), cube.size, args.drafts_per_cube, args.eval_drafts)
             train = rollout.collect_decisions(cube, drafters, args.drafts_per_cube, cfg, rng)
             eval_ = rollout.collect_decisions(cube, drafters, args.eval_drafts, cfg, rng)
             cube_oracle_ids = [cube.oracle_id(i) for i in range(cube.size)]
