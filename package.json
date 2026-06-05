@@ -1,0 +1,10 @@
+{
+  "name": "mtga-cube-draft-bridge",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Node bridge to the mtgdraftbots teacher. Used ONLY offline for Stage 2 distillation dataset generation (scripts/mtgdraftbots_bridge.mjs); not part of the trained model or inference path.",
+  "dependencies": {
+    "mtgdraftbots": "*"
+  }
+}
