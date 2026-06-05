@@ -9,11 +9,14 @@ up correctly before you launch anything expensive.
 
 Usage:
     python scripts/train_smoketest.py --wandb-mode online --steps 5
-    python scripts/train_smoketest.py --wandb-mode disabled   # offline plumbing check
+    # local dev without a GPU (CUDA is required by default):
+    python scripts/train_smoketest.py --wandb-mode disabled --device cpu
 
 A clean run prints `SMOKETEST PASSED` as its final line and exits 0. Any
-failure (missing data, no CUDA when required, non-finite loss) exits non-zero
-with a traceback, so callers can branch on the exit code.
+failure (missing data, no usable CUDA, non-finite loss) exits non-zero with a
+traceback, so callers can branch on the exit code. By default the run requires
+CUDA so it can never silently "pass" on the CPU of a GPU pod; pass
+`--device cpu` to opt into CPU intentionally.
 """
 
 from __future__ import annotations
@@ -65,12 +68,26 @@ class TinyPolicy(nn.Module):
 
 
 def select_device(requested: str) -> torch.device:
-    """Resolve the training device, honoring an explicit request."""
-    if requested == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("--device cuda requested but torch.cuda.is_available() is False")
-    if requested == "auto":
-        requested = "cuda" if torch.cuda.is_available() else "cpu"
-    return torch.device(requested)
+    """Resolve the training device.
+
+    `cpu`  : force CPU — use for local dev on a machine without a GPU.
+    `cuda` / `auto` : require CUDA. A silent CPU fall-back on a GPU pod means
+        the run is orders of magnitude slower AND the GPU plumbing went
+        unvalidated, so we error out instead. Pass `--device cpu` to opt into
+        CPU on purpose.
+    """
+    if requested == "cpu":
+        return torch.device("cpu")
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            f"CUDA is not available to torch (torch {torch.__version__}, "
+            f"built for CUDA {torch.version.cuda}). Common cause: the installed "
+            "torch wheel targets a newer CUDA than the GPU driver supports — "
+            "reinstall a matching build, e.g.\n"
+            "    uv pip install torch --index-url https://download.pytorch.org/whl/cu128\n"
+            "To run on CPU intentionally, pass --device cpu."
+        )
+    return torch.device("cuda")
 
 
 def build_cube(cards_path: Path, cube_size: int) -> CubeVocab:
@@ -221,7 +238,10 @@ def main() -> None:
     )
     parser.add_argument("--cube-size", type=int, default=360, help="cards in the synthetic cube")
     parser.add_argument(
-        "--device", default="auto", choices=["auto", "cuda", "cpu"], help="training device"
+        "--device",
+        default="auto",
+        choices=["auto", "cuda", "cpu"],
+        help="training device; auto/cuda require CUDA, cpu forces CPU (local dev)",
     )
     parser.add_argument("--lr", type=float, default=1e-3, help="Adam learning rate")
     parser.add_argument("--seed", type=int, default=0, help="RNG seed")
