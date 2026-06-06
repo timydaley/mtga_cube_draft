@@ -16,9 +16,12 @@
 #   WANDB_PROJECT             (optional, defaults to cube-draft)
 #
 # Optional tuning env vars:
-#   TORCH_CUDA   PyTorch CUDA wheel tag (default cu128). Must be <= the CUDA
-#                version the pod's NVIDIA driver supports (see `nvidia-smi`).
-#                Set to "cpu" to install a CPU-only torch (skips the GPU check).
+#   TORCH_CUDA              PyTorch CUDA wheel tag (default cu128). Must be <= the
+#                           CUDA version the pod's NVIDIA driver supports (see
+#                           `nvidia-smi`). Set to "cpu" for a CPU-only torch.
+#   INSTALL_MTGDRAFTBOTS    Set to 1 to install Node + the mtgdraftbots package
+#                           for the CubeCobraBot distillation teacher. Off by
+#                           default — only dataset-generation pods need it.
 #
 # This script is idempotent — safe to re-run after a spot interruption.
 
@@ -80,6 +83,18 @@ if not torch.cuda.is_available():
     )
 print(f'CUDA OK: {torch.cuda.get_device_name(0)}')
 "
+fi
+
+# 4c. (optional) Node + mtgdraftbots for the CubeCobraBot distillation teacher.
+# Only dataset-generation pods need this; off by default to keep training lean.
+if [ "${INSTALL_MTGDRAFTBOTS:-0}" = "1" ]; then
+  echo "==> installing Node + mtgdraftbots (CubeCobraBot teacher)"
+  if ! command -v node >/dev/null 2>&1; then
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null 2>&1
+    apt-get install -y -qq nodejs
+  fi
+  npm install --silent
+  node -e "import('mtgdraftbots').then(() => console.log('mtgdraftbots OK')).catch(e => { console.error(e); process.exit(1); })"
 fi
 
 # 5. W&B login (no-op if WANDB_API_KEY already set in env)

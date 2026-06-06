@@ -43,8 +43,12 @@ from cube_draft.bots.random_bot import RandomBot  # noqa: E402
 from cube_draft.bots.raredraft import RaredraftBot  # noqa: E402
 from cube_draft.cards import features  # noqa: E402
 from cube_draft.cards.vocab import CardVocab, CubeVocab  # noqa: E402
-from cube_draft.env.cube_draft import DraftConfig, SeatState  # noqa: E402
-from cube_draft.env.pack import Pack  # noqa: E402
+from cube_draft.data import (
+    cube_list,  # noqa: E402
+    rollout,  # noqa: E402
+)
+from cube_draft.data import dataset as ds  # noqa: E402
+from cube_draft.env.cube_draft import DraftConfig  # noqa: E402
 from cube_draft.model.cc_cpr import CCCPR, CubeTensors, DraftBatch, triplet_loss  # noqa: E402
 from cube_draft.utils import checkpoint as ckpt  # noqa: E402
 from cube_draft.utils.torch_utils import select_device  # noqa: E402
@@ -82,84 +86,15 @@ def make_teacher(name: str, cube: CubeVocab, seed: int) -> Drafter:
     raise ValueError(f"unknown teacher: {name}")
 
 
-# --------------------------------------------------------------------------
-# Draft generation (records every seat's pick decision)
-# --------------------------------------------------------------------------
-
-
-def _observe(seat: SeatState, pack: Pack, pack_idx: int, pick_idx: int, seat_idx: int, n: int) -> dict:
-    pack_vec = np.zeros(n, dtype=np.int8)
-    for c in pack:
-        pack_vec[c] = 1
-    return {
-        "pack": pack_vec,
-        "pool": seat.pool_counts(n),
-        "seen_unpicked": seat.seen_counts(n),
-        "cube_mask": np.ones(n, dtype=np.int8),
-        "pack_idx": pack_idx,
-        "pick_idx": pick_idx,
-        "seat_idx": seat_idx,
-    }
-
-
-def collect_decisions(
+def collect_teacher_decisions(
     cube: CubeVocab, teacher_name: str, n_drafts: int, cfg: DraftConfig, rng: np.random.Generator
 ) -> dict[str, np.ndarray]:
-    """Run `n_drafts` all-teacher drafts; record every (obs, picked) decision.
-
-    Every seat is the teacher, so each draft yields num_seats * total_picks
-    decisions. seen_unpicked accumulates per the §2.4 own-seat-only signal.
-    """
-    n = cube.size
+    """Generate `n_drafts` all-teacher drafts and record every pick decision."""
     drafters = [
         make_teacher(teacher_name, cube, seed=int(rng.integers(0, 2**31 - 1)))
         for _ in range(cfg.num_seats)
     ]
-    packs_buf: list[np.ndarray] = []
-    pools_buf: list[np.ndarray] = []
-    seen_buf: list[np.ndarray] = []
-    pack_idx_buf: list[int] = []
-    pick_idx_buf: list[int] = []
-    picked_buf: list[int] = []
-
-    for _ in range(n_drafts):
-        seats = [SeatState() for _ in range(cfg.num_seats)]
-        for pack_idx in range(cfg.num_packs):
-            n_cards = cfg.pack_size * cfg.num_seats
-            sampled = rng.choice(n, size=n_cards, replace=False)
-            packs = [
-                Pack(sampled[i * cfg.pack_size : (i + 1) * cfg.pack_size].tolist())
-                for i in range(cfg.num_seats)
-            ]
-            direction = 1 if pack_idx % 2 == 0 else -1
-            for pick_idx in range(cfg.pack_size):
-                for seat in range(cfg.num_seats):
-                    pack = packs[seat]
-                    obs = _observe(seats[seat], pack, pack_idx, pick_idx, seat, n)
-                    choice = drafters[seat].pick(obs)
-                    packs_buf.append(obs["pack"])
-                    pools_buf.append(obs["pool"])
-                    seen_buf.append(obs["seen_unpicked"])
-                    pack_idx_buf.append(pack_idx)
-                    pick_idx_buf.append(pick_idx)
-                    picked_buf.append(choice)
-                    seats[seat].seen_unpicked.extend(c for c in pack if c != choice)
-                    seats[seat].pool.append(choice)
-                    pack.pick(choice)
-                # rotate
-                new_packs = [Pack([])] * cfg.num_seats
-                for i, p in enumerate(packs):
-                    new_packs[(i + direction) % cfg.num_seats] = p
-                packs = new_packs
-
-    return {
-        "pack": np.stack(packs_buf),
-        "pool": np.stack(pools_buf),
-        "seen": np.stack(seen_buf),
-        "pack_idx": np.array(pack_idx_buf, dtype=np.int64),
-        "pick_idx": np.array(pick_idx_buf, dtype=np.int64),
-        "picked": np.array(picked_buf, dtype=np.int64),
-    }
+    return rollout.collect_decisions(cube, drafters, n_drafts, cfg, rng)
 
 
 # --------------------------------------------------------------------------
@@ -259,16 +194,35 @@ def train(args: argparse.Namespace) -> None:
     logger.info("global vocab: %d cards", len(global_vocab))
 
     cfg = DraftConfig()
-    # Build cubes + their tensors + per-cube teacher train/eval decision buffers.
+    # Per-cube tensors + train/eval decision buffers. Two sources:
+    #   --dataset DIR : load a prebuilt distillation dataset (e.g. CubeCobraBot,
+    #                   generated offline by scripts/gen_distill_dataset.py),
+    #   otherwise     : generate teacher drafts on the fly with --teacher.
     cube_ts: list[CubeTensors] = []
     train_data: list[dict[str, np.ndarray]] = []
     eval_data: list[dict[str, np.ndarray]] = []
-    for c in range(args.num_cubes):
-        cube = build_cube(global_vocab, args.cube_size, rng)
-        logger.info("cube %d: %d cards; generating %d teacher drafts", c, cube.size, args.drafts_per_cube)
-        cube_ts.append(cube_tensors(cube).to(device))
-        train_data.append(collect_decisions(cube, args.teacher, args.drafts_per_cube, cfg, rng))
-        eval_data.append(collect_decisions(cube, args.teacher, args.eval_drafts, cfg, rng))
+    if args.dataset:
+        bundle = ds.load_dataset(args.dataset)
+        logger.info("loaded dataset %s: %d cubes, teacher=%s", args.dataset, len(bundle), bundle.teacher)
+        for cube_data in bundle.cubes:
+            cube = CubeVocab(global_vocab, cube_data.oracle_ids)
+            cube_ts.append(cube_tensors(cube).to(device))
+            train_data.append(cube_data.train)
+            eval_data.append(cube_data.eval)
+    else:
+        # A fixed published cube (--cube-list) or N random cubes.
+        if args.cube_list:
+            oracle_ids = cube_list.load_oracle_ids(args.cube_list)
+            cubes = [CubeVocab(global_vocab, oracle_ids)]
+            logger.info("cube-list %s: %d cards (%d dropped as OOV)",
+                        args.cube_list, cubes[0].size, len(cubes[0].discarded))
+        else:
+            cubes = [build_cube(global_vocab, args.cube_size, rng) for _ in range(args.num_cubes)]
+        for c, cube in enumerate(cubes):
+            logger.info("cube %d: %d cards; generating %d teacher drafts", c, cube.size, args.drafts_per_cube)
+            cube_ts.append(cube_tensors(cube).to(device))
+            train_data.append(collect_teacher_decisions(cube, args.teacher, args.drafts_per_cube, cfg, rng))
+            eval_data.append(collect_teacher_decisions(cube, args.teacher, args.eval_drafts, cfg, rng))
 
     model = CCCPR(
         vocab_size=len(global_vocab),
@@ -303,13 +257,14 @@ def train(args: argparse.Namespace) -> None:
         },
     )
 
-    logger.info("training params: %d", sum(p.numel() for p in model.parameters()))
+    n_cubes = len(train_data)
+    logger.info("training params: %d  over %d cubes", sum(p.numel() for p in model.parameters()), n_cubes)
     for step in range(start_step, args.steps):
         # Anneal alpha 1.0 -> floor over alpha_decay_steps.
         frac = min(1.0, step / max(1, args.alpha_decay_steps))
         model.set_alpha(1.0 - (1.0 - args.alpha_floor) * frac)
 
-        ci = step % args.num_cubes
+        ci = step % n_cubes
         data = train_data[ci]
         idx = rng.integers(0, len(data["picked"]), size=args.batch_size)
         batch, picked = make_batch(data, idx, device, args.mask_cube, rng)
@@ -377,6 +332,18 @@ def _save(model, optimizer, step: int, args: argparse.Namespace) -> None:
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--data", type=Path, default=Path("data/cards.parquet"))
+    p.add_argument(
+        "--dataset",
+        default=None,
+        help="prebuilt distillation dataset dir or R2 prefix (e.g. CubeCobraBot); "
+        "when set, --cube-size/--num-cubes/--drafts-per-cube/--teacher are ignored",
+    )
+    p.add_argument(
+        "--cube-list",
+        default=None,
+        help="oracle_id cube file (path or R2 key) to train on a fixed published cube "
+        "(e.g. the Arena Cube) instead of random cubes; ignored if --dataset is set",
+    )
     p.add_argument("--cube-size", type=int, default=360)
     p.add_argument("--num-cubes", type=int, default=4, help="distinct random cubes to train across")
     p.add_argument("--drafts-per-cube", type=int, default=64, help="teacher drafts generated per cube")

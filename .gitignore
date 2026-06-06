@@ -47,3 +47,6 @@ runs/
 # Local-only docs
 *.md
 /docs/
+
+# Node (mtgdraftbots bridge — offline distillation only)
+node_modules/
