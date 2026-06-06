@@ -94,7 +94,17 @@ if [ "${INSTALL_MTGDRAFTBOTS:-0}" = "1" ]; then
     apt-get install -y -qq nodejs
   fi
   npm install --silent
-  node -e "import('mtgdraftbots').then(() => console.log('mtgdraftbots OK')).catch(e => { console.error(e); process.exit(1); })"
+  # Exercise the WASM worker through the fetch shim (NODE_OPTIONS reaches worker
+  # threads). A bare `import()` resolves before the worker async-loads its .wasm,
+  # so it must actually init + round-trip, or the check is meaningless.
+  NODE_OPTIONS="--require $REPO_DIR/scripts/node_fetch_shim.cjs" node -e "
+import('mtgdraftbots').then(async (m) => {
+  await m.initializeDraftbots();
+  await m.testRecognized(['9056eba4-612b-4e82-8689-fe098241b007']);
+  await m.terminateDraftbots();
+  console.log('mtgdraftbots OK');
+}).catch((e) => { console.error(e); process.exit(1); });
+"
 fi
 
 # 5. W&B login (no-op if WANDB_API_KEY already set in env)
