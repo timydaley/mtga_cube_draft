@@ -65,7 +65,8 @@ def save_dataset(
     """Write a dataset directory and optionally mirror it to R2."""
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "manifest.json").write_text(
-        json.dumps({"teacher": teacher, "num_cubes": len(cubes), "config": config or {}}, indent=2)
+        # default=str so Path/other non-JSON config values serialize cleanly.
+        json.dumps({"teacher": teacher, "num_cubes": len(cubes), "config": config or {}}, indent=2, default=str)
     )
     for i, cube in enumerate(cubes):
         _oracle_path(out_dir, i).write_text(json.dumps(cube.oracle_ids))
