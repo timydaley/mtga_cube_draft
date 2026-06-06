@@ -43,6 +43,10 @@ def main() -> None:
     p.add_argument("--out", type=Path, required=True, help="output oracle_id JSON")
     p.add_argument("--r2-key", default=None, help="optional R2 key to upload the cube to")
     p.add_argument("--expect", type=int, default=540, help="expected card count (warns if off)")
+    p.add_argument("--fuzzy", action="store_true", help="retry exact-miss names with fuzzy matching")
+    p.add_argument("--fuzzy-backend", default="local", choices=["local", "scryfall"],
+                   help="local=offline difflib, scryfall=Scryfall fuzzy name API")
+    p.add_argument("--fuzzy-cutoff", type=float, default=0.85, help="min similarity for the local backend")
     args = p.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -55,12 +59,24 @@ def main() -> None:
     else:
         names = cube_list.parse_name_file(args.names.read_text())
     vocab = CardVocab.from_parquet(args.data)
-    res = cube_list.resolve_names(vocab, names)
+    res = cube_list.resolve_names(
+        vocab, names, fuzzy=args.fuzzy, fuzzy_cutoff=args.fuzzy_cutoff, fuzzy_backend=args.fuzzy_backend
+    )
 
     logger.info(
-        "names=%d  matched=%d  unmatched=%d  duplicates=%d  -> %d oracle_ids",
-        len(names), len(res.matched), len(res.unmatched), len(res.duplicates), len(res.oracle_ids),
+        "names=%d  matched=%d (fuzzy=%d)  unmatched=%d  duplicates=%d  -> %d oracle_ids",
+        len(names), len(res.matched), len(res.fuzzy), len(res.unmatched), len(res.duplicates),
+        len(res.oracle_ids),
     )
+    if res.fuzzy:
+        # Fuzzy matches were AUTO-ACCEPTED into the cube — review this report.
+        fuzzy_path = args.out.with_suffix(".fuzzy.txt")
+        fuzzy_path.parent.mkdir(parents=True, exist_ok=True)
+        fuzzy_path.write_text(
+            "\n".join(f"{m.input!r}\t->\t{m.matched!r}\t({m.backend} {m.score:.2f})" for m in res.fuzzy) + "\n"
+        )
+        logger.warning("%d names resolved by FUZZY match (auto-accepted) — review %s",
+                       len(res.fuzzy), fuzzy_path)
     if res.unmatched:
         unmatched_path = args.out.with_suffix(".unmatched.txt")
         unmatched_path.parent.mkdir(parents=True, exist_ok=True)

@@ -53,3 +53,32 @@ def test_duplicates_skipped():
 def test_parse_name_file_ignores_comments_and_blanks():
     text = "# header\n\nLightning Bolt\n  Ragavan, Nimble Pilferer  \n# trailing\n"
     assert cube_list.parse_name_file(text) == ["Lightning Bolt", "Ragavan, Nimble Pilferer"]
+
+
+def test_fuzzy_disabled_leaves_typo_unmatched():
+    res = cube_list.resolve_names(_vocab(), ["Lightnin Bolt"])  # missing 'g'
+    assert res.unmatched == ["Lightnin Bolt"]
+    assert not res.oracle_ids
+
+
+def test_fuzzy_local_recovers_typo_and_flags_it():
+    res = cube_list.resolve_names(_vocab(), ["Lightnin Bolt"], fuzzy=True, fuzzy_cutoff=0.8)
+    assert res.oracle_ids == ["oid-bolt"]
+    assert not res.unmatched
+    assert len(res.fuzzy) == 1
+    fm = res.fuzzy[0]
+    assert fm.input == "Lightnin Bolt"
+    assert fm.matched == "Lightning Bolt"
+    assert fm.backend == "local"
+    assert 0.8 <= fm.score <= 1.0
+
+
+def test_fuzzy_high_cutoff_rejects_bad_match():
+    res = cube_list.resolve_names(_vocab(), ["Completely Different"], fuzzy=True, fuzzy_cutoff=0.9)
+    assert res.unmatched == ["Completely Different"]
+
+
+def test_exact_match_does_not_use_fuzzy_report():
+    res = cube_list.resolve_names(_vocab(), ["Lightning Bolt"], fuzzy=True)
+    assert res.oracle_ids == ["oid-bolt"]
+    assert res.fuzzy == []  # exact match — not flagged
