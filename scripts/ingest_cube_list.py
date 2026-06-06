@@ -7,8 +7,11 @@ consume via --cube-list. Unresolved names are written to <out>.unmatched.txt so
 the source list can be fixed — this is the QA gate for a scraped list.
 
 Usage:
-    python scripts/ingest_cube_list.py --names cubes/arena_cube_5_0.provisional.txt \
+    # preferred: fetch the complete, clean list straight from CubeCobra
+    python scripts/ingest_cube_list.py --cubecobra-id mtgapc \
         --out cubes/arena_cube_5_0.json [--r2-key cubes/arena_cube_5_0.json]
+    # or from a local names file
+    python scripts/ingest_cube_list.py --names cubes/some_cube.txt --out cubes/some_cube.json
 """
 
 from __future__ import annotations
@@ -33,7 +36,9 @@ logger = logging.getLogger("ingest_cube_list")
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--names", type=Path, required=True, help="newline-delimited card-name file")
+    src = p.add_mutually_exclusive_group(required=True)
+    src.add_argument("--names", type=Path, help="newline-delimited card-name file")
+    src.add_argument("--cubecobra-id", help="CubeCobra cube id/shortId (e.g. mtgapc for the Arena Cube)")
     p.add_argument("--data", type=Path, default=Path("data/cards.parquet"))
     p.add_argument("--out", type=Path, required=True, help="output oracle_id JSON")
     p.add_argument("--r2-key", default=None, help="optional R2 key to upload the cube to")
@@ -44,7 +49,11 @@ def main() -> None:
     if not args.data.exists():
         raise FileNotFoundError(f"card data not found at {args.data}")
 
-    names = cube_list.parse_name_file(args.names.read_text())
+    if args.cubecobra_id:
+        names = cube_list.fetch_cubecobra_list(args.cubecobra_id)
+        logger.info("fetched %d names from CubeCobra cube %s", len(names), args.cubecobra_id)
+    else:
+        names = cube_list.parse_name_file(args.names.read_text())
     vocab = CardVocab.from_parquet(args.data)
     res = cube_list.resolve_names(vocab, names)
 

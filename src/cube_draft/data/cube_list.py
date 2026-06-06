@@ -18,6 +18,21 @@ from pathlib import Path
 from cube_draft.cards.vocab import CardVocab
 
 _LOCAL_CACHE = Path("data/cubes")
+_USER_AGENT = "cube-draft/0.0.1 (https://github.com/timydaley/mtga_cube_draft)"
+
+
+def fetch_cubecobra_list(cube_id: str, timeout: int = 30) -> list[str]:
+    """Fetch a cube's card names from CubeCobra's plain-text list API.
+
+    Cleaner and more complete than scraping an article. `cube_id` is the cube's
+    short id or UUID (e.g. "mtgapc" for the official Arena Powered Cube).
+    """
+    import requests
+
+    url = f"https://cubecobra.com/cube/api/cubelist/{cube_id}"
+    resp = requests.get(url, headers={"User-Agent": _USER_AGENT}, timeout=timeout)
+    resp.raise_for_status()
+    return [line.strip() for line in resp.text.splitlines() if line.strip()]
 
 
 def normalize_name(name: str) -> str:
