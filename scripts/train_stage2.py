@@ -41,6 +41,7 @@ except ImportError:
 from cube_draft.bots.base import Drafter  # noqa: E402
 from cube_draft.bots.random_bot import RandomBot  # noqa: E402
 from cube_draft.bots.raredraft import RaredraftBot  # noqa: E402
+from cube_draft.bots.seventeenlands import SeventeenLandsBot  # noqa: E402
 from cube_draft.cards import features  # noqa: E402
 from cube_draft.cards.vocab import CardVocab, CubeVocab  # noqa: E402
 from cube_draft.data import (
@@ -48,6 +49,7 @@ from cube_draft.data import (
     rollout,  # noqa: E402
 )
 from cube_draft.data import dataset as ds  # noqa: E402
+from cube_draft.data import seventeenlands as sl  # noqa: E402
 from cube_draft.env.cube_draft import DraftConfig  # noqa: E402
 from cube_draft.model.cc_cpr import CCCPR, CubeTensors, DraftBatch, triplet_loss  # noqa: E402
 from cube_draft.utils import checkpoint as ckpt  # noqa: E402
@@ -78,20 +80,29 @@ def cube_tensors(cube: CubeVocab) -> CubeTensors:
     )
 
 
-def make_teacher(name: str, cube: CubeVocab, seed: int) -> Drafter:
+def make_teacher(name: str, cube: CubeVocab, seed: int, values: np.ndarray | None = None) -> Drafter:
     if name == "raredraft":
         return RaredraftBot(cube, seed=seed)
     if name == "random":
         return RandomBot(seed=seed)
+    if name == "17lands":
+        if values is None:
+            raise ValueError("17lands teacher requires a per-cube value array")
+        return SeventeenLandsBot(values, seed=seed)
     raise ValueError(f"unknown teacher: {name}")
 
 
 def collect_teacher_decisions(
-    cube: CubeVocab, teacher_name: str, n_drafts: int, cfg: DraftConfig, rng: np.random.Generator
+    cube: CubeVocab,
+    teacher_name: str,
+    n_drafts: int,
+    cfg: DraftConfig,
+    rng: np.random.Generator,
+    values: np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
     """Generate `n_drafts` all-teacher drafts and record every pick decision."""
     drafters = [
-        make_teacher(teacher_name, cube, seed=int(rng.integers(0, 2**31 - 1)))
+        make_teacher(teacher_name, cube, seed=int(rng.integers(0, 2**31 - 1)), values=values)
         for _ in range(cfg.num_seats)
     ]
     return rollout.collect_decisions(cube, drafters, n_drafts, cfg, rng)
@@ -218,11 +229,19 @@ def train(args: argparse.Namespace) -> None:
                         args.cube_list, cubes[0].size, len(cubes[0].discarded))
         else:
             cubes = [build_cube(global_vocab, args.cube_size, rng) for _ in range(args.num_cubes)]
+        # The 17lands teacher needs a per-cube value array from the ratings file.
+        by_oracle = sl.load_ratings(args.ratings) if args.teacher == "17lands" else None
         for c, cube in enumerate(cubes):
-            logger.info("cube %d: %d cards; generating %d teacher drafts", c, cube.size, args.drafts_per_cube)
+            values = sl.value_array(cube, by_oracle, args.value_metric) if by_oracle else None
+            if values is not None:
+                covered = int(np.count_nonzero(~np.isclose(values, values.min())))
+                logger.info("cube %d: %d cards; 17lands metric=%s (~%d cards above floor)",
+                            c, cube.size, args.value_metric, covered)
+            else:
+                logger.info("cube %d: %d cards; generating %d teacher drafts", c, cube.size, args.drafts_per_cube)
             cube_ts.append(cube_tensors(cube).to(device))
-            train_data.append(collect_teacher_decisions(cube, args.teacher, args.drafts_per_cube, cfg, rng))
-            eval_data.append(collect_teacher_decisions(cube, args.teacher, args.eval_drafts, cfg, rng))
+            train_data.append(collect_teacher_decisions(cube, args.teacher, args.drafts_per_cube, cfg, rng, values))
+            eval_data.append(collect_teacher_decisions(cube, args.teacher, args.eval_drafts, cfg, rng, values))
 
     model = CCCPR(
         vocab_size=len(global_vocab),
@@ -348,7 +367,10 @@ def main() -> None:
     p.add_argument("--num-cubes", type=int, default=4, help="distinct random cubes to train across")
     p.add_argument("--drafts-per-cube", type=int, default=64, help="teacher drafts generated per cube")
     p.add_argument("--eval-drafts", type=int, default=16, help="held-out teacher drafts per cube for eval")
-    p.add_argument("--teacher", default="raredraft", choices=["raredraft", "random"])
+    p.add_argument("--teacher", default="raredraft", choices=["raredraft", "random", "17lands"])
+    p.add_argument("--ratings", default=None, help="17lands ratings file (path/R2 key) for --teacher 17lands")
+    p.add_argument("--value-metric", default="drawn_improvement_win_rate", choices=list(sl.METRICS),
+                   help="17lands metric the teacher maximizes")
 
     p.add_argument("--steps", type=int, default=5000)
     p.add_argument("--batch-size", type=int, default=512)
@@ -380,6 +402,8 @@ def main() -> None:
             f"card data not found at {args.data}. Run scripts/download_scryfall.py or "
             f"scripts/r2_sync.py pull scryfall/oracle_cards.parquet {args.data}."
         )
+    if args.teacher == "17lands" and not args.ratings and not args.dataset:
+        raise SystemExit("--teacher 17lands needs --ratings (run scripts/fetch_17lands_cube.py first)")
     train(args)
 
 
